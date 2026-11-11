@@ -1,0 +1,17 @@
+# Python 3.10. Pin exact versions after the first successful install on the
+# team machine:  pip freeze > requirements.lock
+# torch: install the CUDA build that matches your driver FIRST, e.g.
+#   pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
+# then:  pip install -r requirements.txt
+numpy>=1.24,<2.0
+scipy>=1.10
+pandas>=2.0
+scikit-learn>=1.3
+opencv-python>=4.8
+PyYAML>=6.0
+matplotlib>=3.7
+tqdm>=4.65
+open_clip_torch==2.24.0
+pytest>=7.4
+# optional, only needed once memories get large:
+# faiss-cpu>=1.7.4

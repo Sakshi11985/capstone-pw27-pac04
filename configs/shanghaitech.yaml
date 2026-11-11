@@ -1,0 +1,23 @@
+# Phase 1 config: ShanghaiTech Campus pre-processing + frozen baseline.
+# Every setting lives here; nothing is hard-coded in the scripts.
+
+dataset: shanghaitech
+data_root: data/shanghaitech        # contains training/ and testing/ (see docs/datasets.md)
+features_root: features
+scenes: ["01", "02", "03"]          # null = all 13 scenes
+seed: 0
+
+clip:
+  length: 16                        # consecutive frames per clip, non-overlapping
+  frames_per_clip: 4                # sampled evenly inside each clip
+  grid: 2                           # 2 -> 2x2 regions. Ablation: 1 and 3
+
+encoder:
+  name: clip_vitb16                 # clip_vitb16 | dinov2_vitb14 (ablation) | dummy (tests only)
+  device: cuda                      # cuda | cpu
+  batch_size: 128                   # region crops per forward pass; lower if GPU memory is tight
+  fp16: true
+
+baseline:
+  k: [1, 5]                         # nearest neighbours in the memory
+  sigma: [0, 3, 7]                  # temporal Gaussian smoothing in clips (0 = none)
