@@ -66,6 +66,12 @@ feature type for all 13 scenes in one pass, checks counts, runs the baseline for
 feature type, and zips `features/` as `features_shanghaitech_all.zip`. Put that zip in
 the capstone folder and run `python -m scripts.merge_features ../features_shanghaitech_all.zip`.
 
+**Gate G2 (lighting change):** `notebooks/kaggle_relight.ipynb` adds re-lit copies of the
+training videos (`dim`, `night`, `warm`, `bright`; rgb + motion, 2×2) as 8 new folders.
+Unzip `features_shanghaitech_relit.zip` into `features/`, then
+
+    python -m scripts.run_streams --config configs/shanghaitech.yaml --change appearance --appearance dim
+
 ### On Colab instead
 
 Upload the repository and the dataset to Google Drive, then in a GPU notebook:
