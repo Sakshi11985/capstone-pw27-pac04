@@ -92,12 +92,15 @@ def fuse_channels(parts: list) -> np.ndarray:
     return x / np.sqrt(len(parts))
 
 
-def load_features(cfg: dict, split: str, scenes=None, grid: int | None = None):
+def load_features(cfg: dict, split: str, scenes=None, grid: int | None = None,
+                  appearance: str | None = None):
     """Load the channels listed in cfg['features']['channels'] (default ['rgb']) for one
-    grid and fuse them. Returns (clips DataFrame, {video_id: float32 [clips, R, D_total]})."""
+    grid (and appearance: None = as recorded, or e.g. "dim") and fuse them.
+    Returns (clips DataFrame, {video_id: float32 [clips, R, D_total]})."""
     from src.preprocess.extract import feature_dir
     channels = (cfg.get("features") or {}).get("channels") or ["rgb"]
-    loaded = [load_split(feature_dir(cfg, grid, None, ch), split, scenes) for ch in channels]
+    loaded = [load_split(feature_dir(cfg, grid, None, ch, appearance), split, scenes)
+              for ch in channels]
     df0, f0 = loaded[0]
     for ch, (df, f) in zip(channels[1:], loaded[1:]):
         key = ["video_id", "clip_idx"]

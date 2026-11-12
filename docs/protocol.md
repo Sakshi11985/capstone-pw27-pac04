@@ -79,6 +79,31 @@ human checks) breaks that link?
   anomaly type), spread evenly; clips repeat when the pool is small (counted).
 * 5 stream seeds per scene (video split, order, burst video, anomaly type).
 
+### Appearance change for G2 (proposed 2026-11-12, `streams.change: appearance`)
+Pre-registered here BEFORE any re-lit stream is run; to be agreed with the guide.
+* **What changes.** Phase B and the probe are training videos re-rendered under an
+  illumination preset (`src/preprocess/appearance.py`): `dim` (dusk: gamma 1.8, gain
+  0.6, noise 3), `night` (gamma 2.4, gain 0.35, bluish, noise 8), `warm` (tungsten
+  colour cast), `bright` (sunlight, gamma 0.7, gain 1.25). Rgb and motion images are
+  formed from the re-lit frames. Only training videos are re-lit; C, D (anomalies) and
+  E (return to the old lighting) stay as recorded. The change is abrupt (lights switched).
+* **Which videos.** Per stream seed, about 30% of the scene's training clips (whole
+  videos) are chosen as change videos; alternating by novelty rank, half feed B and half
+  form the probe. Their ORIGINAL versions never enter the memory or the stream, so the
+  memory has never seen these clips in any lighting. The rest are split as before
+  (memory / phases A, D, E).
+* **Visibility check.** A scene is used only if the preset is visible: share of re-lit
+  clips flagged by a memory of original clips of OTHER videos, at a threshold giving 1%
+  false alarms on the same reference videos in original lighting, ≥ `min_novelty` (0.1).
+* **Primary preset: `dim`.** Rule fixed now: if the median visibility of `dim` over
+  scenes is below 0.1, `night` becomes primary; this is decided from the visibility
+  numbers only, before stream results are looked at. `night`, `warm`, `bright` are
+  reported as robustness checks.
+* **G2 criterion unchanged:** T_adapt90 finite on at least 3 of 5 seeds for a score gate
+  in at least 5 scenes. With identical (not re-lit) features as a plumbing check, phase
+  lengths allow 7 scenes (01, 04, 05, 06, 08, 10, 12); scenes 02, 03, 07, 09, 11 have
+  too few training clips for any change.
+
 ## Phase 3: admission kernel (implemented 2026-11-12, `src/streams/kernel.py`, `scripts/run_kernel.py`)
 * **Kernel streams:** per scene, constant anomaly rate π ∈ {0.02, 0.05, 0.1, 0.2, 0.3, 0.5},
   order iid or bursty (blocks of 10), 3 seeds, ~800 clips. Old-normal clips from training
@@ -119,4 +144,5 @@ contamination lifetime, recovery, retention, chain existence.
 signed-rank with Holm correction for paired comparisons.
 
 ## Change log
-* (none yet)
+* 2026-11-12: appearance-change streams proposed for G2 (section above); cluster change kept
+  as the default until the guide agrees.

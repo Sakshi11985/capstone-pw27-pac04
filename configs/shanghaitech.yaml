@@ -17,6 +17,9 @@ extract:                            # what ONE extraction pass produces (Kaggle)
   grids: [1, 2, 3]                  # 1x1 (whole frame), 2x2 (main), 3x3 (finer) regions
   diff_stride: 2                    # frame gap for the motion image
   diff_gain: 4.0                    # amplification of the motion image before CLIP
+  appearances: [none]               # none = video as recorded; G2 pass adds re-lit copies:
+                                    #   --split train --grids 2 --appearances dim night warm bright
+                                    # presets: src/preprocess/appearance.py
 
 features:                           # which cached channels the experiments use
   channels: [rgb]                   # [rgb] | [diff] | [rgb, diff] (fused: mean of cosines)
@@ -51,6 +54,10 @@ streams:
   burst_len: 10
   persistent_frac: 0.2              # share of anomalous clips in phase D
   persistent_videos: 3              # most similar anomalous test videos = one "type"
+  change: cluster                   # legitimate change in B: cluster | appearance (G2 proposal)
+  appearance: dim                   # illumination preset when change = appearance
+  change_video_frac: 0.3            # appearance: share of training clips (by video) re-lit
+                                    # for B + probe; their originals are never streamed
 
 memory:
   size: 512                         # slots per scene and region (capped by available clips)

@@ -1,6 +1,7 @@
 """W2.3 + W2.4 / gate G2: run every update rule on five-phase streams.
 
     python -m scripts.run_streams --config configs/shanghaitech.yaml
+    python -m scripts.run_streams --config configs/shanghaitech.yaml --change appearance --appearance dim
 
 For each scene and stream seed: build the stream, initialise an identical memory for
 every rule, set the alarm threshold from the frozen memory on phase A, run each rule
@@ -29,8 +30,8 @@ from src.eval.metrics import frame_auc
 from src.eval.scoring import aggregate, clip_scores, labels_dir, load_features, load_frame_labels
 from src.memory.memory import SceneMemory
 from src.rules.rules import build_rule
-from src.streams.generator import (SceneTooSmall, StreamConfig, build_scene_pools,
-                                   make_stream)
+from src.streams.generator import (SceneTooSmall, StreamConfig, build_appearance_pools,
+                                   build_scene_pools, make_stream)
 from src.streams.runner import run_stream
 from src.utils.common import REPO_ROOT, load_config, log_run, set_seed, with_channels
 
@@ -72,8 +73,9 @@ def run(cfg: dict, log: bool = True, out_root=None, make_plots: bool = True,
     fdir = labels_dir(cfg)
     how = (cfg.get("score") or {}).get("aggregate", "mean")
     chans = (cfg.get("features") or {}).get("channels") or ["rgb"]
-    tag = ("" if chans == ["rgb"] else "_" + "+".join(chans)) + suffix   # keeps runs apart
     scfg = StreamConfig.from_dict(cfg.get("streams"))
+    tag = ("" if chans == ["rgb"] else "_" + "+".join(chans))           # keeps runs apart
+    tag += (f"_{scfg.appearance}" if scfg.change == "appearance" else "") + suffix
     scfg.aggregate = how                                       # novelty uses the alarm aggregate
     seeds = (cfg.get("streams") or {}).get("seeds", [0, 1, 2, 3, 4])
     mcfg = cfg.get("memory", {})
@@ -86,6 +88,8 @@ def run(cfg: dict, log: bool = True, out_root=None, make_plots: bool = True,
 
     tr_df, tr_feats = load_features(cfg, "train")
     te_df, te_feats = load_features(cfg, "test")
+    if scfg.change == "appearance":                          # re-lit copies of training clips
+        ap_df, ap_feats = load_features(cfg, "train", appearance=scfg.appearance)
     scenes = cfg.get("scenes") or sorted(te_df.scene_id.unique())
     labels_frame = {v: load_frame_labels(fdir, v) for v in te_feats}
     sdir = out_root / "streams" / (cfg["dataset"] + tag)
@@ -94,7 +98,11 @@ def run(cfg: dict, log: bool = True, out_root=None, make_plots: bool = True,
     rows, skipped, traces = [], {}, {}
     for scene in scenes:
         try:
-            pools = build_scene_pools(scene, tr_df, tr_feats, te_df, te_feats, scfg)
+            if scfg.change == "appearance":
+                pools = build_appearance_pools(scene, tr_df, tr_feats, te_df, te_feats,
+                                               ap_df, ap_feats, scfg)
+            else:
+                pools = build_scene_pools(scene, tr_df, tr_feats, te_df, te_feats, scfg)
         except SceneTooSmall as e:
             skipped[scene] = str(e); print("SKIP", e); continue
         for seed in seeds:
@@ -156,7 +164,8 @@ def run(cfg: dict, log: bool = True, out_root=None, make_plots: bool = True,
                 if log:
                     log_run("scripts/run_streams.py", cfg,
                             {"scene": scene, "stream_seed": seed, "rule": name, "k": k,
-                             "memory": mcfg, "aggregate": how,
+                             "memory": mcfg, "aggregate": how, "change": scfg.change,
+                             "appearance": scfg.appearance if scfg.change == "appearance" else None,
                              "channels": (cfg.get("features") or {}).get("channels") or ["rgb"]},
                             {key: (round(v, 4) if isinstance(v, float) and math.isfinite(v) else
                                    (str(v) if isinstance(v, float) else v))
@@ -225,10 +234,18 @@ def main():
     ap.add_argument("--min-clips", nargs=4, type=int, default=None, metavar=("A", "B", "D", "E"),
                     help="override streams.min_clips (sensitivity runs)")
     ap.add_argument("--suffix", default="", help="appended to result file names")
+    ap.add_argument("--change", choices=["cluster", "appearance"], default=None,
+                    help="override streams.change (the legitimate change of phase B)")
+    ap.add_argument("--appearance", default=None,
+                    help="override streams.appearance, e.g. dim | night | warm | bright")
     a = ap.parse_args()
     cfg = with_channels(load_config(a.config), a.channels)
     if a.min_clips:
         cfg.setdefault("streams", {})["min_clips"] = dict(zip("ABDE", a.min_clips))
+    if a.change:
+        cfg.setdefault("streams", {})["change"] = a.change
+    if a.appearance:
+        cfg.setdefault("streams", {})["appearance"] = a.appearance
     run(cfg, log=not a.no_log, suffix=a.suffix)
 
 

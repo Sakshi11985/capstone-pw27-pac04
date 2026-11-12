@@ -1,8 +1,11 @@
 """W2.3: five-phase test streams built from real clips of ONE scene.
 
     A  normal               old-normal clips (training videos NOT used for the memory)
-    B  legitimate change    one k-means cluster of training-normal clips, held out of the
-                            initial memory: truly normal, but new to the memory
+    B  legitimate change    change="cluster": one k-means cluster of training-normal clips,
+                            held out of the initial memory: truly normal, but new to it.
+                            change="appearance": held-out training videos re-rendered under
+                            an illumination preset (src/preprocess/appearance.py), e.g. dusk;
+                            same scene and activities, new lighting (gate G2)
     C  anomaly burst        a short contiguous run of anomalous test clips (one video)
     D  persistent anomaly   normal clips with anomalous clips of one "type" interleaved
                             at rate p (type = the most similar anomalous test videos; a
@@ -28,6 +31,7 @@ import pandas as pd
 from sklearn.cluster import KMeans
 
 TEST_UID_OFFSET = 1_000_000
+APPEARANCE_UID_OFFSET = 500_000     # re-lit training clip = 500_000 + its train row
 
 
 @dataclass
@@ -47,6 +51,10 @@ class StreamConfig:
     persistent_frac: float = 0.2
     persistent_videos: int = 3
     aggregate: str = "mean"                   # region-score aggregate, same as the alarms
+    change: str = "cluster"                   # legitimate change: cluster | appearance
+    appearance: str = "dim"                   # preset for change="appearance"
+    change_video_frac: float = 0.3            # appearance: share of training clips (by video)
+                                              # re-lit for phase B + probe
 
     @classmethod
     def from_dict(cls, d: dict | None):
@@ -66,8 +74,9 @@ class ScenePools:
     labels: dict                 # uid -> clip label (0/1)
     train: pd.DataFrame          # this scene's training clips, with uid and cluster
     test: pd.DataFrame           # this scene's test clips, with uid
-    heldout: int                 # held-out cluster id
+    heldout: int                 # held-out cluster id (-1 for an appearance change)
     cluster_info: dict
+    mode: str = "cluster"        # cluster | appearance
 
 
 def _clip_score(Q, M, how: str = "mean"):
@@ -190,6 +199,53 @@ def build_scene_pools(scene, train_df, train_feats, test_df, test_feats, cfg: St
     return ScenePools(scene, feats, labels, tr, te, h, info)
 
 
+def appearance_novelty(X, Xa, vid, n_splits=5, false_alarm=0.01, how: str = "mean"):
+    """Share of RE-LIT clips that a memory of original clips flags, at a threshold giving
+    `false_alarm` on original clips of the same reference videos; the reference videos
+    are never in the memory, so the only difference measured is the lighting.
+    X, Xa: [n, R, D] original / re-lit versions of the same clips; vid: video per clip."""
+    out = []
+    vids = np.unique(vid)
+    for sp in range(n_splits):
+        v = vids.copy()
+        np.random.default_rng(sp).shuffle(v)
+        ref = np.isin(vid, v[: len(v) // 2])
+        mem = ~ref
+        if ref.sum() == 0 or mem.sum() == 0:
+            return 0.0
+        thr = np.quantile(_clip_score(X[ref], X[mem], how), 1 - false_alarm)
+        out.append(float((_clip_score(Xa[ref], X[mem], how) > thr).mean()))
+    return float(np.mean(out))
+
+
+def build_appearance_pools(scene, train_df, train_feats, test_df, test_feats,
+                           app_df, app_feats, cfg: StreamConfig) -> ScenePools:
+    """Pools for change="appearance": all clips of the scene plus a re-lit copy of every
+    training clip (uid = APPEARANCE_UID_OFFSET + train row, label 0). app_df/app_feats:
+    the re-lit training features (same clips as train_df, checked)."""
+    if len(train_df) >= APPEARANCE_UID_OFFSET:
+        raise ValueError("too many training clips for the appearance uid range")
+    tr, te, feats, labels = scene_tables(scene, train_df, train_feats, test_df, test_feats)
+    ta = app_df[app_df.scene_id == scene]
+    key = ["video_id", "clip_idx"]
+    if not tr[key].reset_index(drop=True).equals(ta[key].reset_index(drop=True)):
+        raise ValueError(f"scene {scene}: re-lit clips differ from the original training clips")
+    for row, (v, ci) in zip(tr.index, zip(tr.video_id, tr.clip_idx)):
+        u = APPEARANCE_UID_OFFSET + int(row)
+        feats[u] = app_feats[v][int(ci)]
+        labels[u] = 0
+    tr["cluster"] = 0
+    X = np.stack([feats[int(u)] for u in tr.uid])
+    Xa = np.stack([feats[APPEARANCE_UID_OFFSET + int(r)] for r in tr.index])
+    nov = appearance_novelty(X, Xa, tr.video_id.to_numpy(), how=cfg.aggregate)
+    info = {"mode": "appearance", "appearance": cfg.appearance, "novelty": round(nov, 3),
+            "change_video_frac": cfg.change_video_frac}
+    if not nov >= cfg.min_novelty:
+        raise SceneTooSmall(f"scene {scene}: appearance '{cfg.appearance}' not visible to the "
+                            f"memory (novelty {nov:.2f} < {cfg.min_novelty})")
+    return ScenePools(scene, feats, labels, tr, te, -1, info, mode="appearance")
+
+
 def _video_blocks(df, rng):
     """Clips grouped by video, videos in random order, temporal order inside a video."""
     vids = np.array(df.video_id.unique(), dtype=object)
@@ -200,8 +256,15 @@ def _video_blocks(df, rng):
 def make_stream(p: ScenePools, seed: int, cfg: StreamConfig) -> dict:
     rng = np.random.default_rng(seed)
     tr, te = p.train, p.test
-    held = tr[tr.cluster == p.heldout]
-    rest = tr[tr.cluster != p.heldout]
+    if p.mode == "appearance":
+        # change videos (re-lit) are drawn per seed; their originals never enter the
+        # memory or the stream, so the memory has never seen these clips in any lighting
+        rest, change_vids = split_stream_videos(tr, rng, cfg.change_video_frac)
+        held = tr[tr.video_id.isin(change_vids)].copy()
+        held["uid"] = held.index.astype(np.int64) + APPEARANCE_UID_OFFSET
+    else:
+        held = tr[tr.cluster == p.heldout]
+        rest = tr[tr.cluster != p.heldout]
 
     # --- split old-normal training videos: memory vs stream (by video, no leakage)
     init, stream_vids = split_stream_videos(rest, rng, cfg.stream_video_frac)
