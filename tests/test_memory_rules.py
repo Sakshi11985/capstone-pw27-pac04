@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from src.memory.memory import EMPTY, RegionMemory, SceneMemory
+from src.memory.memory import RegionMemory, SceneMemory
 from src.rules.rules import (FrozenRule, SceneMemoryRule, ScoreGateRule, TextGateRule,
                              training_scores)
 from src.streams.runner import run_stream
@@ -48,7 +48,7 @@ def test_no_adaptive_slots():
 
 
 def test_undo_by_provenance():
-    mem, feats, uids, centre, rng = make_scene()
+    mem, feats, *_ = make_scene()
     x = feats[:1]
     mem.update(x[0], np.ones(4, bool), uid=777, t=0)
     assert mem.evict_sources([777]) == 4
@@ -63,7 +63,7 @@ def test_leave_one_out_training_scores():
 
 def test_scoring_is_causal():
     """A clip's score must not change if it (or a later clip) is admitted."""
-    mem, feats, uids, centre, rng = make_scene()
+    mem, feats, uids, *_ = make_scene()
     stream = feats[:5] + 0.0
     a = run_stream(mem, FrozenRule(), stream, np.arange(5))
     mem2, *_ = make_scene()

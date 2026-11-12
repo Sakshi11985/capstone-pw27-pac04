@@ -39,7 +39,7 @@ class _TorchEncoder:
         self.torch = torch
         self.device = device if (device == "cpu" or torch.cuda.is_available()) else "cpu"
         if self.device != device:
-            print(f"[encoder] CUDA not available, falling back to CPU (slow)")
+            print("[encoder] CUDA not available, falling back to CPU (slow)")
         self.fp16 = fp16 and self.device.startswith("cuda")
         self.model = model.to(self.device).eval()
         if self.fp16:

@@ -21,15 +21,30 @@ import numpy as np
 from src.memory.memory import SceneMemory
 
 
-def training_scores(memory: SceneMemory, feats: np.ndarray, uids: np.ndarray) -> np.ndarray:
-    """Per-region 1-NN distance of training clips to the memory, ignoring the slot
-    a clip itself wrote (leave-one-out). Returns [n, R]."""
+def training_scores(memory: SceneMemory, feats: np.ndarray, uids: np.ndarray,
+                    groups: Optional[np.ndarray] = None) -> np.ndarray:
+    """Per-region 1-NN distance of training clips to the memory. Returns [n, R].
+
+    Each clip is scored as if it were new: the slot it wrote is ignored, and if
+    `groups` (e.g. the video id of each clip, aligned with `uids`) is given, every
+    slot written by a clip of the same group is ignored too. Without groups, the
+    neighbouring clips of the same video remain in memory and are near-duplicates,
+    so thresholds come out far too strict (calibration bug found on ShanghaiTech:
+    0% of legitimately new clips could pass a 95% gate).
+    """
     out = np.empty((len(feats), memory.n_regions), dtype=np.float32)
     uids = np.asarray(uids)
+    if groups is not None:
+        g_of = dict(zip(uids.tolist(), np.asarray(groups).tolist()))
+        my_g = np.asarray(groups)
     for r, mem in enumerate(memory.regions):
         sims = feats[:, r] @ mem.feats.T                       # [n, M]
         sims[:, ~mem.valid] = -np.inf
-        sims[uids[:, None] == mem.source[None, :]] = -np.inf   # leave-one-out
+        if groups is None:
+            sims[uids[:, None] == mem.source[None, :]] = -np.inf   # leave-one-out
+        else:
+            src_g = np.array([g_of.get(int(u), None) for u in mem.source], dtype=object)
+            sims[my_g[:, None] == src_g[None, :]] = -np.inf          # leave-one-group-out
         out[:, r] = 1.0 - sims.max(axis=1)
     return out
 
@@ -37,8 +52,10 @@ def training_scores(memory: SceneMemory, feats: np.ndarray, uids: np.ndarray) ->
 class UpdateRule:
     name = "base"
 
-    def calibrate(self, memory: SceneMemory, train_feats: np.ndarray, train_uids: np.ndarray):
-        """Set thresholds from training-normal data only. Called once per stream."""
+    def calibrate(self, memory: SceneMemory, train_feats: np.ndarray, train_uids: np.ndarray,
+                  groups: Optional[np.ndarray] = None):
+        """Set thresholds from training-normal data only. Called once per stream.
+        `groups`: video id per training clip, for leave-one-video-out scores."""
 
     def reset(self):
         """Clear per-stream history."""
@@ -61,8 +78,8 @@ class ScoreGateRule(UpdateRule):
         self.quantile = quantile
         self.beta: Optional[np.ndarray] = None
 
-    def calibrate(self, memory, train_feats, train_uids):
-        s = training_scores(memory, train_feats, train_uids)
+    def calibrate(self, memory, train_feats, train_uids, groups=None):
+        s = training_scores(memory, train_feats, train_uids, groups)
         self.beta = np.quantile(s, self.quantile, axis=0)       # one threshold per region
 
     def decide(self, region_scores, uid, t):
@@ -81,8 +98,8 @@ class SceneMemoryRule(UpdateRule):
         self.hist: deque = deque(maxlen=history)
         self.lo = self.hi = None
 
-    def calibrate(self, memory, train_feats, train_uids):
-        s = training_scores(memory, train_feats, train_uids).max(axis=1)
+    def calibrate(self, memory, train_feats, train_uids, groups=None):
+        s = training_scores(memory, train_feats, train_uids, groups).max(axis=1)
         self.lo, self.hi = float(s.min()), float(np.quantile(s, 0.99))
 
     def reset(self):
@@ -109,8 +126,8 @@ class TextGateRule(UpdateRule):
     def __init__(self, visual: UpdateRule, text_agree: Optional[Callable[[int, int], bool]] = None):
         self.visual, self.text_agree = visual, text_agree
 
-    def calibrate(self, memory, train_feats, train_uids):
-        self.visual.calibrate(memory, train_feats, train_uids)
+    def calibrate(self, memory, train_feats, train_uids, groups=None):
+        self.visual.calibrate(memory, train_feats, train_uids, groups)
 
     def reset(self):
         self.visual.reset()

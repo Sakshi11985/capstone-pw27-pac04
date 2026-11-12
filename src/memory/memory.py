@@ -30,6 +30,7 @@ class RegionMemory:
         self.source = np.full(size, EMPTY, dtype=np.int64)    # clip uid that wrote the slot
         self.from_train = np.zeros(size, dtype=bool)
         self.t_insert = np.full(size, -1, dtype=np.int64)     # -1 = initial fill
+        self.last_evicted_t = -1
 
     # ---------------------------------------------------------------- setup
     def init_from(self, feats: np.ndarray, uids: np.ndarray, rng: np.random.Generator):
@@ -69,6 +70,8 @@ class RegionMemory:
             cand = np.flatnonzero(adaptive)
             slot = int(cand[np.argmin(self.t_insert[cand])])   # oldest first (-1 = initial)
         evicted = int(self.source[slot]) if self.valid[slot] else EMPTY
+        # when the evicted entry had been written during the stream (-1 = initial fill)
+        self.last_evicted_t = int(self.t_insert[slot]) if self.valid[slot] else -1
         self.feats[slot] = x
         self.valid[slot] = True
         self.source[slot] = uid

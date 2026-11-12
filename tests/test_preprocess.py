@@ -63,3 +63,76 @@ def test_extract_end_to_end(fake_shanghaitech, cfg_for):
     mtime = (out / "train" / "01_001.npy").stat().st_mtime
     extract(cfg_for(fake_shanghaitech), verbose=False)
     assert (out / "train" / "01_001.npy").stat().st_mtime == mtime
+
+
+def test_selective_reading_matches_full_read(fake_shanghaitech):
+    """Skipping unused frames must return exactly the same kept frames and frame count,
+    for frame folders (thread pool) and video files (grab)."""
+    from src.preprocess.datasets import iter_frames
+    tr = list_shanghaitech(fake_shanghaitech, "train")[0]       # .avi
+    te = list_shanghaitech(fake_shanghaitech, "test")[0]        # frame folder
+    keep = lambda i: i % 16 in (0, 5, 10, 15)
+    for item in (tr, te):
+        full = list(iter_frames(item))
+        part = list(iter_frames(item, keep=keep, workers=3))
+        assert len(full) == len(part)
+        for i, (a, b) in enumerate(zip(full, part)):
+            if keep(i):
+                assert np.array_equal(a, b)
+            else:
+                assert b is None
+
+
+def test_natural_frame_order(tmp_path):
+    import cv2
+    from src.preprocess.datasets import VideoItem, iter_frames
+    d = tmp_path / "01_0001"
+    d.mkdir()
+    for t in [1, 2, 10]:                                       # 10.jpg must come last
+        cv2.imwrite(str(d / f"{t}.jpg"), np.full((32, 32, 3), t * 20, np.uint8))
+    vals = [int(f[0, 0, 0]) for f in iter_frames(VideoItem("01_0001", "01", "test", d))]
+    assert [round(v / 20) for v in vals] == [1, 2, 10]
+
+
+# ---------------------------------------------------------------- multi-output extraction
+def test_motion_image_and_partner():
+    from src.preprocess.extract import diff_partner, motion_image
+    assert [diff_partner(o, 2, 16) for o in (0, 5, 10, 15)] == [2, 3, 8, 13]
+    a = np.full((4, 4, 3), 100, np.uint8)
+    b = a.copy()
+    b[0, 0] = 90
+    m = motion_image(a, b, 4.0)
+    assert m[0, 0, 0] == 40 and m[1, 1, 0] == 0 and m.dtype == np.uint8
+    assert motion_image(np.zeros_like(a), np.full_like(a, 200), 4.0).max() == 255  # clipped
+
+
+def test_extract_rgb_and_diff_all_grids_one_pass(fake_shanghaitech, cfg_for):
+    from src.preprocess.extract import feature_dir
+    cfg = cfg_for(fake_shanghaitech)
+    cfg["extract"] = {"inputs": ["rgb", "diff"], "grids": [1, 2, 3]}
+    extract(cfg, verbose=False)
+    for inp in ("rgb", "diff"):
+        for g in (1, 2, 3):
+            d = feature_dir(cfg, g, None, inp)
+            x = np.load(d / "test" / "01_0014.npy")
+            assert x.shape == (4, g * g, 64), (inp, g, x.shape)
+            te = pd.read_csv(d / "test_clips.csv", dtype={"scene_id": str})
+            assert len(te) == 8 and te.label.sum() == 6
+    rgb = np.load(feature_dir(cfg, 2, None, "rgb") / "test" / "01_0014.npy")
+    dif = np.load(feature_dir(cfg, 2, None, "diff") / "test" / "01_0014.npy")
+    assert not np.allclose(rgb, dif)                           # motion is a different signal
+
+
+def test_rgb_features_unchanged_by_multi_output(fake_shanghaitech, cfg_for, tmp_path):
+    """Adding diff/other grids to the pass must not change the rgb 2x2 features."""
+    import copy
+    from src.preprocess.extract import feature_dir
+    a = cfg_for(fake_shanghaitech)
+    b = copy.deepcopy(a)
+    b["features_root"] = str(tmp_path / "multi")
+    b["extract"] = {"inputs": ["rgb", "diff"], "grids": [2, 3]}
+    extract(a, verbose=False)
+    extract(b, verbose=False)
+    x = np.load(feature_dir(a, 2) / "train" / "01_001.npy")
+    y = np.load(feature_dir(b, 2) / "train" / "01_001.npy")
+    assert np.array_equal(x, y)

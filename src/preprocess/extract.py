@@ -1,19 +1,27 @@
-"""W1.2: turn every video into cached region features.
+"""W1.2: turn every video into cached region features, several kinds in ONE pass.
 
     python -m src.preprocess.extract --config configs/shanghaitech.yaml
-    python -m src.preprocess.extract --config configs/shanghaitech.yaml --grid 1   # ablation caches
-    python -m src.preprocess.extract --config configs/shanghaitech.yaml --limit 2  # quick smoke test
+    python -m src.preprocess.extract --config configs/shanghaitech.yaml --limit 2   # smoke test
+    python -m src.preprocess.extract --config configs/shanghaitech.yaml --inputs rgb --grids 2
 
-Output (under features_root/<dataset>/<encoder>_g<grid>/):
-    train/<video_id>.npy     float16 [clips, grid*grid, D]   (L2-normalised)
-    test/<video_id>.npy
-    meta/<split>/<video_id>.csv   one row per clip
-    labels/<video_id>.npy    int8 frame labels (test videos)
-    train_clips.csv, test_clips.csv   all clip rows concatenated
-    info.json                settings used, for reproducibility
+Each video is decoded once; every requested OUTPUT = (input, grid) is encoded from it:
+  input "rgb"  : the sampled frames themselves (appearance)
+  input "diff" : motion images |frame(o) - frame(o -/+ stride)| x gain, one per sampled
+                 frame (the inter-frame RGB difference cue of Hu, Du & Wang, MM 2025)
+  grid g       : g x g regions per frame (1 = whole frame)
+Settings come from the `extract:` section of the config (inputs, grids, diff_stride,
+diff_gain); without it, only (rgb, clip.grid) is produced, as before.
 
-Re-running skips videos that are already done, so an interrupted run
-(e.g. a Colab session timing out) can simply be started again.
+Output, one folder per output under features_root/<dataset>/:
+  <encoder>_g<g>            for rgb   (e.g. clip_vitb16_g2, unchanged name)
+  <encoder>_diff_g<g>       for diff  (e.g. clip_vitb16_diff_g2)
+each containing
+    train/<video_id>.npy, test/<video_id>.npy   float16 [clips, g*g, D], L2-normalised
+    meta/<split>/<video_id>.csv                 one row per clip
+    labels/<video_id>.npy                       int8 frame labels (test videos)
+    train_clips.csv, test_clips.csv, info.json
+Re-running skips outputs that already exist for a video, so an interrupted run
+(e.g. a Kaggle session timing out) can simply be started again.
 """
 from __future__ import annotations
 
@@ -33,62 +41,114 @@ from .encoders import build_encoder
 
 CLIP_COLUMNS = ["video_id", "scene_id", "split", "clip_idx", "start_frame", "end_frame",
                 "n_frames_video", "label", "anom_frac"]
+INPUTS = ("rgb", "diff")
 
 
-def feature_dir(cfg: dict, grid: int | None = None, encoder: str | None = None) -> Path:
+def feature_dir(cfg: dict, grid: int | None = None, encoder: str | None = None,
+                input: str = "rgb") -> Path:
     grid = grid or cfg["clip"]["grid"]
     encoder = encoder or cfg["encoder"]["name"]
-    return resolve(cfg["features_root"]) / cfg["dataset"] / f"{encoder}_g{grid}"
+    tag = f"{encoder}_g{grid}" if input == "rgb" else f"{encoder}_{input}_g{grid}"
+    return resolve(cfg["features_root"]) / cfg["dataset"] / tag
 
 
-def encode_video(item, encoder, length: int, frames_per_clip: int, grid: int,
-                 batch_size: int):
-    """Returns (features float16 [clips, R, D], n_frames)."""
-    offsets = set(sample_offsets(length, frames_per_clip).tolist())
-    R = grid * grid
-    pending: list[np.ndarray] = []        # model inputs, F*R per finished clip
-    current: list[np.ndarray] = []
-    chunks: list[np.ndarray] = []
-    n_frames = 0
+def requested_outputs(cfg: dict, inputs=None, grids=None) -> list[tuple[str, int]]:
+    ex = cfg.get("extract") or {}
+    inputs = inputs or ex.get("inputs") or ["rgb"]
+    grids = grids or ex.get("grids") or [cfg["clip"]["grid"]]
+    bad = [i for i in inputs if i not in INPUTS]
+    if bad:
+        raise ValueError(f"unknown inputs {bad}; choose from {INPUTS}")
+    return [(i, int(g)) for i in inputs for g in grids]
 
-    def flush(force=False):
-        nonlocal pending
-        per_clip = frames_per_clip * R
-        n_ready = len(pending) // per_clip
-        if n_ready == 0 or (not force and len(pending) < batch_size):
-            return
-        take = n_ready * per_clip
-        feats = encoder.encode(np.stack(pending[:take]))
-        chunks.append(feats.reshape(n_ready, frames_per_clip, R, -1))
-        pending = pending[take:]
 
-    for f, frame in enumerate(iter_frames(item)):
+def diff_partner(o: int, stride: int, length: int) -> int:
+    """Frame paired with sampled offset o for the motion image (stays inside the clip)."""
+    return o - stride if o - stride >= 0 else min(o + stride, length - 1)
+
+
+def motion_image(a: np.ndarray, b: np.ndarray, gain: float) -> np.ndarray:
+    """|a - b| per pixel and channel, amplified and clipped to uint8."""
+    d = np.abs(a.astype(np.int16) - b.astype(np.int16)).astype(np.float32) * gain
+    return np.clip(d, 0, 255).astype(np.uint8)
+
+
+class _Output:
+    """Collects model inputs for one (input, grid) and encodes them in batches."""
+
+    def __init__(self, inp, grid, fpc, encoder, batch_size):
+        self.inp, self.grid, self.R, self.fpc = inp, grid, grid * grid, fpc
+        self.encoder, self.batch = encoder, batch_size
+        self.pending, self.chunks = [], []
+
+    def add_clip(self, images):                 # images: fpc frames (RGB or motion)
+        for im in images:
+            for reg in split_regions(im, self.grid):
+                self.pending.append(to_model_input(reg, mean=self.encoder.mean,
+                                                   std=self.encoder.std))
+        if len(self.pending) >= self.batch:
+            self.flush()
+
+    def flush(self):
+        per_clip = self.fpc * self.R
+        n = len(self.pending) // per_clip
+        if n:
+            f = self.encoder.encode(np.stack(self.pending[:n * per_clip]))
+            self.chunks.append(f.reshape(n, self.fpc, self.R, -1))
+            self.pending = self.pending[n * per_clip:]
+
+    def result(self) -> np.ndarray:
+        self.flush()
+        x = np.concatenate(self.chunks).mean(axis=1)          # average the sampled frames
+        x = x / np.maximum(np.linalg.norm(x, axis=-1, keepdims=True), 1e-12)
+        return x.astype(np.float16)
+
+
+def encode_video(item, encoder, length: int, frames_per_clip: int, outputs,
+                 batch_size: int, diff_stride: int = 2, diff_gain: float = 4.0):
+    """outputs: list of (input, grid). Returns ({(input, grid): float16 [clips, R, D]}, n_frames)."""
+    offsets = sample_offsets(length, frames_per_clip).tolist()
+    need_diff = any(i == "diff" for i, _ in outputs)
+    partners = {o: diff_partner(o, diff_stride, length) for o in offsets}
+    needed = set(offsets) | (set(partners.values()) if need_diff else set())
+    bufs = {(i, g): _Output(i, g, frames_per_clip, encoder, batch_size) for i, g in outputs}
+    held, n_frames = {}, 0
+    for f, frame in enumerate(iter_frames(item, keep=lambda k: k % length in needed)):
         n_frames = f + 1
         pos = f % length
-        if pos in offsets:
-            for reg in split_regions(frame, grid):
-                current.append(to_model_input(reg, mean=encoder.mean, std=encoder.std))
-        if pos == length - 1:              # clip complete
-            pending.extend(current)
-            current = []
-            flush()
-    flush(force=True)
-    if not chunks:
+        if pos in needed:
+            held[pos] = frame
+        if pos == length - 1:                                   # clip complete
+            rgb = [held[o] for o in offsets]
+            mot = [motion_image(held[o], held[partners[o]], diff_gain) for o in offsets] \
+                if need_diff else None
+            for (i, g), b in bufs.items():
+                b.add_clip(rgb if i == "rgb" else mot)
+            held = {}
+    if n_frames < length:
         raise ValueError(f"{item.video_id}: shorter than one clip ({n_frames} frames)")
-    x = np.concatenate(chunks).mean(axis=1)            # average the sampled frames
-    x = x / np.maximum(np.linalg.norm(x, axis=-1, keepdims=True), 1e-12)
-    return x.astype(np.float16), n_frames
+    return {k: b.result() for k, b in bufs.items()}, n_frames
+
+
+def _write_index(out: Path, split: str):
+    metas = sorted((out / "meta" / split).glob("*.csv"))
+    if metas:
+        df = pd.concat([pd.read_csv(m, dtype={"scene_id": str, "video_id": str}) for m in metas])
+        df.to_csv(out / f"{split}_clips.csv", index=False)
 
 
 def run(cfg: dict, grid: int | None = None, encoder_name: str | None = None,
-        splits=("train", "test"), limit: int | None = None, verbose: bool = True) -> Path:
+        splits=("train", "test"), limit: int | None = None, verbose: bool = True,
+        inputs=None, grids=None) -> Path:
+    """Returns the folder of the first output (the rgb one if requested)."""
     set_seed(cfg.get("seed", 0))
     length = cfg["clip"]["length"]
     fpc = cfg["clip"]["frames_per_clip"]
-    grid = grid or cfg["clip"]["grid"]
     enc_cfg = cfg["encoder"]
+    ex = cfg.get("extract") or {}
     encoder_name = encoder_name or enc_cfg["name"]
-    out = feature_dir(cfg, grid, encoder_name)
+    outputs = requested_outputs(cfg, inputs, [grid] if grid else grids)
+    dirs = {o: feature_dir(cfg, o[1], encoder_name, o[0]) for o in outputs}
     root = resolve(cfg["data_root"])
     encoder = None
 
@@ -96,62 +156,70 @@ def run(cfg: dict, grid: int | None = None, encoder_name: str | None = None,
         items = list_videos(cfg["dataset"], root, split, cfg.get("scenes"))
         if limit:
             items = items[:limit]
-        (out / split).mkdir(parents=True, exist_ok=True)
-        (out / "meta" / split).mkdir(parents=True, exist_ok=True)
-        (out / "labels").mkdir(parents=True, exist_ok=True)
+        for d in dirs.values():
+            for sub in (split, f"meta/{split}", "labels"):
+                (d / sub).mkdir(parents=True, exist_ok=True)
         t0 = time.time()
         for i, item in enumerate(items):
-            fpath = out / split / f"{item.video_id}.npy"
-            mpath = out / "meta" / split / f"{item.video_id}.csv"
-            if fpath.exists() and mpath.exists():
+            todo = [o for o in outputs
+                    if not ((dirs[o] / split / f"{item.video_id}.npy").exists()
+                            and (dirs[o] / "meta" / split / f"{item.video_id}.csv").exists())]
+            if not todo:
                 continue
             if encoder is None:
                 encoder = build_encoder(encoder_name, enc_cfg.get("device", "cuda"),
                                         enc_cfg.get("fp16", True))
-            feats, n_frames = encode_video(item, encoder, length, fpc, grid,
-                                           enc_cfg.get("batch_size", 128))
-            n_clips = feats.shape[0]
+            feats, n_frames = encode_video(item, encoder, length, fpc, todo,
+                                           enc_cfg.get("batch_size", 128),
+                                           ex.get("diff_stride", 2), ex.get("diff_gain", 4.0))
             flabels = load_frame_labels(item, n_frames)
+            n_clips = next(iter(feats.values())).shape[0]
             lab, frac = clip_labels(flabels, n_clips, length)
-            rows = []
-            for c in range(n_clips):
-                s, e = clip_bounds(c, length)
-                rows.append([item.video_id, item.scene_id, split, c, s, e, n_frames,
-                             int(lab[c]), float(frac[c])])
-            if split == "test":
-                np.save(out / "labels" / f"{item.video_id}.npy", flabels)
-            np.save(fpath, feats)                                   # features first,
-            pd.DataFrame(rows, columns=CLIP_COLUMNS).to_csv(mpath, index=False)  # meta marks done
+            rows = [[item.video_id, item.scene_id, split, c, *clip_bounds(c, length), n_frames,
+                     int(lab[c]), float(frac[c])] for c in range(n_clips)]
+            for o in todo:
+                d = dirs[o]
+                if split == "test":
+                    np.save(d / "labels" / f"{item.video_id}.npy", flabels)
+                np.save(d / split / f"{item.video_id}.npy", feats[o])          # features first,
+                pd.DataFrame(rows, columns=CLIP_COLUMNS).to_csv(               # meta marks done
+                    d / "meta" / split / f"{item.video_id}.csv", index=False)
             if verbose:
-                el = time.time() - t0
                 print(f"[{split}] {i + 1}/{len(items)} {item.video_id}: {n_frames} frames, "
-                      f"{n_clips} clips, {int(lab.sum())} anomalous  ({el:.0f}s)", flush=True)
-        metas = sorted((out / "meta" / split).glob("*.csv"))
-        if metas:
-            df = pd.concat([pd.read_csv(m, dtype={"scene_id": str}) for m in metas])
-            df.to_csv(out / f"{split}_clips.csv", index=False)
+                      f"{n_clips} clips, {int(lab.sum())} anomalous, outputs "
+                      f"{['%s_g%d' % o for o in todo]}  ({time.time() - t0:.0f}s)", flush=True)
+        for d in dirs.values():
+            _write_index(d, split)
 
-    info = {"dataset": cfg["dataset"], "scenes": cfg.get("scenes"), "encoder": encoder_name,
-            "grid": grid, "clip_length": length, "frames_per_clip": fpc,
-            "sample_offsets": sample_offsets(length, fpc).tolist(),
-            "region_resize": "direct 224x224 bicubic, no centre crop",
-            "dtype": "float16, L2-normalised after averaging sampled frames"}
-    (out / "info.json").write_text(json.dumps(info, indent=2))
-    return out
+    for (inp, g), d in dirs.items():
+        info = {"dataset": cfg["dataset"], "scenes": cfg.get("scenes"), "encoder": encoder_name,
+                "input": inp, "grid": g, "clip_length": length, "frames_per_clip": fpc,
+                "sample_offsets": sample_offsets(length, fpc).tolist(),
+                "region_resize": "direct 224x224 bicubic, no centre crop",
+                "dtype": "float16, L2-normalised after averaging sampled frames"}
+        if inp == "diff":
+            info.update({"diff_stride": ex.get("diff_stride", 2),
+                         "diff_gain": ex.get("diff_gain", 4.0),
+                         "diff_definition": "|frame(o) - frame(o-stride)|, or o+stride at the "
+                                            "clip start, times gain, clipped to 0-255"})
+        (d / "info.json").write_text(json.dumps(info, indent=2))
+    return dirs[outputs[0]]
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
-    ap.add_argument("--grid", type=int, default=None)
+    ap.add_argument("--inputs", nargs="+", default=None, help="override extract.inputs")
+    ap.add_argument("--grids", nargs="+", type=int, default=None, help="override extract.grids")
     ap.add_argument("--encoder", default=None)
     ap.add_argument("--split", choices=["train", "test", "both"], default="both")
     ap.add_argument("--limit", type=int, default=None, help="only the first N videos per split")
     a = ap.parse_args()
     cfg = load_config(a.config)
     splits = ("train", "test") if a.split == "both" else (a.split,)
-    out = run(cfg, a.grid, a.encoder, splits, a.limit)
-    print(f"done -> {out}")
+    run(cfg, None, a.encoder, splits, a.limit, inputs=a.inputs, grids=a.grids)
+    print("done ->", ", ".join(str(feature_dir(cfg, g, a.encoder, i))
+                               for i, g in requested_outputs(cfg, a.inputs, a.grids)))
 
 
 if __name__ == "__main__":

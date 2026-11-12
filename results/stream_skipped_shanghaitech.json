@@ -1,0 +1,10 @@
+{
+ "02": "scene 02: phases too short {'B': 82, 'D': 29} (minimum {'A': 50, 'B': 100, 'D': 50, 'E': 50}); old-normal pool 149 clips",
+ "03": "scene 03: no cluster with 100 to 71 clips",
+ "06": "scene 06: no visible legitimate change (best novelty 0.04 < 0.1)",
+ "07": "scene 07: no cluster with 100 to 126 clips",
+ "09": "scene 09: phases too short {'D': 37} (minimum {'A': 50, 'B': 100, 'D': 50, 'E': 50}); old-normal pool 185 clips",
+ "10": "scene 10: no visible legitimate change (best novelty 0.01 < 0.1)",
+ "11": "scene 11: no visible legitimate change (best novelty 0.10 < 0.1)",
+ "12": "scene 12: phases too short {'B': 71} (minimum {'A': 50, 'B': 100, 'D': 50, 'E': 50}); old-normal pool 583 clips"
+}

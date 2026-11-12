@@ -7,3 +7,35 @@ __pycache__/
 .pytest_cache/
 .venv/
 *.npy
+
+# Python / tooling caches
+*.pyo
+*.pyd
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Windows / OneDrive / editors
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+*.tmp
+*.bak
+*.swp
+
+# Generated Kaggle config & feature archives
+configs/kaggle.yaml
+*.zip
+
+# Regenerable per-seed stream traces
+results/streams/
+

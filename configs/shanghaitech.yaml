@@ -4,13 +4,25 @@
 dataset: shanghaitech
 data_root: data/shanghaitech        # contains training/ and testing/ (see docs/datasets.md)
 features_root: features
-scenes: ["01", "02", "03"]          # null = all 13 scenes
+scenes: null                        # null = every scene found (all 13 after the Kaggle run)
 seed: 0
 
 clip:
   length: 16                        # consecutive frames per clip, non-overlapping
   frames_per_clip: 4                # sampled evenly inside each clip
   grid: 2                           # 2 -> 2x2 regions. Ablation: 1 and 3
+
+extract:                            # what ONE extraction pass produces (Kaggle)
+  inputs: [rgb, diff]               # rgb = appearance; diff = motion images |f(t) - f(t-2)| x 4
+  grids: [1, 2, 3]                  # 1x1 (whole frame), 2x2 (main), 3x3 (finer) regions
+  diff_stride: 2                    # frame gap for the motion image
+  diff_gain: 4.0                    # amplification of the motion image before CLIP
+
+features:                           # which cached channels the experiments use
+  channels: [rgb]                   # [rgb] | [diff] | [rgb, diff] (fused: mean of cosines)
+
+score:
+  aggregate: mean                   # mean | max over regions (mean: 0.760 vs 0.752 AUC, 01-03)
 
 encoder:
   name: clip_vitb16                 # clip_vitb16 | dinov2_vitb14 (ablation) | dummy (tests only)
@@ -21,3 +33,57 @@ encoder:
 baseline:
   k: [1, 5]                         # nearest neighbours in the memory
   sigma: [0, 3, 7]                  # temporal Gaussian smoothing in clips (0 = none)
+
+# ---------------- Phase 2: streams, memory, rules, metrics (W2.1-W2.4)
+streams:
+  seeds: [0, 1, 2, 3, 4]
+  n_clusters: [3, 4, 5, 6]          # k-means on training videos; all k searched
+  holdout_unit: video               # the legitimate change = a group of similar videos
+  holdout: novelty                  # pick the group a memory without it flags most
+  max_holdout_frac: 0.5             # ...but at most half of the scene's clips
+  min_novelty: 0.1                  # skip the scene if no group is >= 10% novel
+  stream_video_frac: 0.5            # old-normal training clips kept for the stream (by video)
+  phase_split: {A: 0.4, D: 0.2, E: 0.4}
+  max_clips: {A: 400, B: 400, D: 300, E: 400}
+  min_clips: {A: 50, B: 100, D: 50, E: 50}
+  b_order: gradual                  # the change arrives least-novel videos first
+  probe: true                       # half the changed videos are held back as a probe
+  burst_len: 10
+  persistent_frac: 0.2              # share of anomalous clips in phase D
+  persistent_videos: 3              # most similar anomalous test videos = one "type"
+
+memory:
+  size: 512                         # slots per scene and region (capped by available clips)
+  anchor_frac: 0.25
+
+rules:
+  - {name: frozen}
+  - {name: score_gate, quantile: 0.90}
+  - {name: score_gate, quantile: 0.95}
+  - {name: scene_memory}
+
+metrics:
+  k: 1                              # from G1
+  sigma: 3                          # from G1 (retention AUC)
+  false_alarm: 0.01                 # alarm threshold: 1% of clean phase-A clips
+  window: 50
+  tol: 0.01
+  probe_every: 10                   # probe checkpoint spacing in phase B (clips)
+
+# ---------------- Phase 3: admission kernel q(rho), R0, equilibrium (H1, H1b)
+kernel:
+  pis: [0.02, 0.05, 0.1, 0.2, 0.3, 0.5]   # constant anomaly rate of a kernel stream
+  orders: [iid, bursty]             # anomalies at random positions | in blocks of burst_len
+  seeds: [0, 1, 2]
+  length: 800                       # target clips per stream (capped by the scene's supply)
+  burst_len: 10
+  anomaly_pool: type                # type: 3 most similar anomalous test videos | all
+  pool_videos: 3
+  stream_video_frac: 0.5            # training clips (by video) fed as stream; rest fill memory
+  min_normal: 150
+  min_admissions: 100
+  min_anomalous_admissions: 10
+  n_bins: 12
+  knee_level: 0.5                   # pi_c = smallest pi whose equilibrium impurity >= this
+  bootstrap: 200
+  block: 50

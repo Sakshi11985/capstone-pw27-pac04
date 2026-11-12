@@ -14,6 +14,7 @@ from src.utils.common import load_config
 
 EXPECTED_01_03 = {"train_videos": 104, "test_videos": 47, "train_clips": 4964,
                   "test_clips": 1056, "anomalous_test_clips": 468}
+OFFICIAL_ALL = {"train_videos": 330, "test_videos": 107}     # ShanghaiTech Campus, 13 scenes
 
 
 def main():
@@ -28,7 +29,12 @@ def main():
            "anomalous_test_clips": int(te.label.sum())}
     print(f"{'quantity':<22}{'now':>8}{'earlier':>9}")
     for k, v in got.items():
-        exp = EXPECTED_01_03[k] if cfg.get("scenes") == ["01", "02", "03"] else "-"
+        if cfg.get("scenes") == ["01", "02", "03"]:
+            exp = EXPECTED_01_03[k]
+        elif not cfg.get("scenes"):
+            exp = OFFICIAL_ALL.get(k, "-")
+        else:
+            exp = "-"
         flag = "" if exp == "-" or exp == v else "   <-- differs"
         print(f"{k:<22}{v:>8}{exp:>9}{flag}")
     print("\nper scene:")

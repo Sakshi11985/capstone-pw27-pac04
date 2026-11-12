@@ -39,6 +39,13 @@ def load_config(path: str | Path) -> dict:
     return cfg
 
 
+def with_channels(cfg: dict, channels) -> dict:
+    """Override features.channels from the command line (e.g. ["rgb", "diff"])."""
+    if channels:
+        cfg.setdefault("features", {})["channels"] = list(channels)
+    return cfg
+
+
 def resolve(path: str | Path) -> Path:
     """Relative paths in configs are relative to the repository root."""
     p = Path(path)

@@ -11,11 +11,13 @@ The full plan is in `../Capstone_Work_Plan.docx`. This repository follows its la
 |---|---|
 | W0.1 repository, config, seeding, run log | done |
 | W0.2 `docs/protocol.md` | draft, **needs team + guide sign-off** |
-| W1.2 pre-processing + CLIP feature cache | code done and tested; **run it on the GPU** |
-| W1.3 frozen-memory baseline + eval module | code done and tested; gives G1 once features exist |
+| W1.2 pre-processing + CLIP feature cache | rgb 2×2 done for scenes 01–03; **one Kaggle pass now gives rgb + motion, 1×1/2×2/3×3, all 13 scenes** |
+| W1.3 frozen-memory baseline + eval module | done; **G1 passed** (micro AUC 0.752, k = 1, σ = 3) |
 | W2.1 memory (anchor + adaptive slots, provenance, undo) | code done and tested |
 | W2.2 update rules: frozen, score gate, scene-memory, text-gate hook | code done and tested |
-| W2.3 five-phase streams, W2.4 T_adapt and metrics | next |
+| W2.3 five-phase streams | done (`src/streams/generator.py`) |
+| W2.4 alarm threshold, T_adapt, contamination, recovery, retention | done (`src/eval/adaptation.py`); **G2 not yet passed** |
+| Phase 3 kernel q(ρ), R₀, pₐ(ρ), composition law (H1, H1b) | done (`src/streams/kernel.py`, `scripts/run_kernel.py`) |
 
 ## Setup (once)
 
@@ -26,7 +28,7 @@ python -m venv .venv
 .venv\Scripts\activate            # Linux/macOS: source .venv/bin/activate
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
-python -m pytest                   # 24 tests, CPU only, ~10 s
+python -m pytest                   # 46 tests, CPU only, ~1 min
 ```
 
 ## Reproduce Phase 1 in three commands
@@ -39,14 +41,32 @@ python -m pytest                   # 24 tests, CPU only, ~10 s
 python -m src.preprocess.extract --config configs/shanghaitech.yaml   # features (GPU)
 python -m scripts.check_counts   --config configs/shanghaitech.yaml   # compare with earlier counts
 python -m scripts.baseline       --config configs/shanghaitech.yaml   # frozen baseline AUC (G1)
+python -m scripts.run_streams    --config configs/shanghaitech.yaml   # streams, T_adapt etc. (G2), ~1 min, CPU
+python -m scripts.merge_features ../features_shanghaitech_all.zip     # add a Kaggle zip to features/
+python -m scripts.run_kernel     --config configs/shanghaitech.yaml   # Phase 3: kernel, R0 (H1, H1b), CPU
 ```
+
+**Feature types.** One extraction pass writes six folders under `features/shanghaitech/`:
+`clip_vitb16_g{1,2,3}` (appearance) and `clip_vitb16_diff_g{1,2,3}` (motion: CLIP on
+|frame(t) − frame(t−2)| × 4). Choose what experiments use in the config:
+`features.channels: [rgb]`, `[diff]` or `[rgb, diff]` (fused), the grid with `clip.grid`,
+and how region scores combine with `score.aggregate: mean` (default) or `max`.
 
 Try `--limit 2` on the first command for a 1-minute smoke test. The extractor
 skips finished videos, so an interrupted run can just be restarted.
 For the grid ablation: add `--grid 1` and `--grid 3` to the first and last command.
 For all 13 scenes set `scenes: null`.
 
-### On Colab or Kaggle instead of the laptop
+### On Kaggle (recommended if the laptop is slow)
+
+Use `notebooks/kaggle_extract.ipynb`: upload this folder (zipped) as a private Kaggle
+dataset, add it and ShanghaiTech as inputs, choose **GPU T4** and **Internet on**, then
+Run All. It finds both inputs itself, writes `configs/kaggle.yaml`, extracts every
+feature type for all 13 scenes in one pass, checks counts, runs the baseline for each
+feature type, and zips `features/` as `features_shanghaitech_all.zip`. Put that zip in
+the capstone folder and run `python -m scripts.merge_features ../features_shanghaitech_all.zip`.
+
+### On Colab instead
 
 Upload the repository and the dataset to Google Drive, then in a GPU notebook:
 
