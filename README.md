@@ -11,8 +11,8 @@ The full plan is in `../Capstone_Work_Plan.docx`. This repository follows its la
 |---|---|
 | W0.1 repository, config, seeding, run log | done |
 | W0.2 `docs/protocol.md` | draft, **needs team + guide sign-off** |
-| W1.2 pre-processing + CLIP feature cache | rgb 2×2 done for scenes 01–03; **one Kaggle pass now gives rgb + motion, 1×1/2×2/3×3, all 13 scenes** |
-| W1.3 frozen-memory baseline + eval module | done; **G1 passed** (micro AUC 0.752, k = 1, σ = 3) |
+| W1.2 pre-processing + CLIP feature cache | done for all 13 scenes: rgb + motion, 1×1/2×2/3×3 (Kaggle) |
+| W1.3 frozen-memory baseline + eval module | done; **G1 passed** on scenes 01–03 (micro AUC 0.752); all 13 scenes: 0.657 RGB 2×2, 0.697 motion 2×2 (k = 1, σ = 3) |
 | W2.1 memory (anchor + adaptive slots, provenance, undo) | code done and tested |
 | W2.2 update rules: frozen, score gate, scene-memory, text-gate hook | code done and tested |
 | W2.3 five-phase streams | done (`src/streams/generator.py`) |
@@ -28,7 +28,7 @@ python -m venv .venv
 .venv\Scripts\activate            # Linux/macOS: source .venv/bin/activate
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
-python -m pytest                   # 46 tests, CPU only, ~1 min
+python -m pytest                   # 53 tests, CPU only, ~1 min
 ```
 
 ## Reproduce Phase 1 in three commands
